@@ -7,6 +7,7 @@ pub mod stats;
 pub mod triagem;
 pub mod triggers;
 pub mod units;
+pub mod whatsapp;
 
 use axum::{
     routing::{get, patch, post},
@@ -39,5 +40,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/triggers", get(triggers::list_triggers))
         .route("/api/triggers/evaluate", post(triggers::evaluate_triggers))
         .route("/api/cron/run-daily-alerts", post(cron::run_daily_alerts))
+        .route("/api/whatsapp/webhook", post(whatsapp::webhook))
         .with_state(state)
 }
