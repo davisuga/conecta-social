@@ -1,18 +1,28 @@
 //! LLM-assisted triagem interpreter (rig.rs + Anthropic Claude).
 //!
-//! Hook point: invoked by `triagem_chat` only when the deterministic parser
+//! Hook point: invoked by `triagem_chat` whenever the deterministic parser
 //! (`parse_q1`/`parse_q2`/`parse_q3`) returns `None`. The agent inspects the
-//! user's free-form message, the running chat history for the session, and a
-//! step-specific preamble — then calls the `record_answer` tool with one
-//! canonical value from a whitelist. The whitelist is enforced inside the
-//! tool's `call()`, so hallucinated values become `Outcome::Unparseable`.
+//! user's free-form message together with the running chat history and a
+//! step-specific preamble. Two paths:
 //!
-//! Chat history persists in `triagem_chat_turns` (last 20 turns replayed).
+//! - The user clearly answered the current question → the model calls
+//!   `record_answer` with the canonical value AND replies with a short
+//!   acknowledgment that includes the next question. The caller persists the
+//!   answer and forwards the reply as-is — no canned next-question text.
+//! - The user asked a question, requested help, or is confused → the model
+//!   replies in plain text (no tool call) explaining briefly and re-asking the
+//!   current question. The caller sends the reply; session state stays put.
+//!
+//! Whitelists are enforced inside the tool's `call()`, so hallucinated
+//! canonical values become `AgentOutcome::OnlyReply`. If anything in the rig
+//! pipeline errors out the caller gets `AgentOutcome::Failed` and falls back
+//! to a generic apology. Chat turns persist in `triagem_chat_turns` (last 20
+//! replayed) so multi-turn context survives across webhook calls.
 
 use std::env;
 use std::sync::{Arc, Mutex};
 
-use rig_core::client::{CompletionClient, ProviderClient};
+use rig_core::client::CompletionClient;
 use rig_core::completion::{Chat, Message, ToolDefinition};
 use rig_core::providers::anthropic;
 use rig_core::tool::Tool;
@@ -35,12 +45,17 @@ pub enum AgentStep {
 
 #[derive(Debug)]
 pub enum AgentOutcome {
-    /// Tool was called with a whitelisted canonical value. Feed to handle_qN.
-    Recorded(String),
-    /// LLM responded but no valid tool call captured. Caller should reprompt.
-    Unparseable,
-    /// Agent unavailable (no API key, network error, etc.). Caller should
-    /// emit the generic apology configured in the design.
+    /// Model tool-called with a whitelisted canonical value. `reply` is the
+    /// natural-language acknowledgment to forward to the user — it should
+    /// already include or lead into the next question, so callers should NOT
+    /// also send the canned next-question text.
+    Recorded { value: String, reply: String },
+    /// Model didn't record an answer but produced a useful reply (general
+    /// help, clarifying explanation, re-asking the current question). State
+    /// stays put; just forward `reply`.
+    OnlyReply(String),
+    /// Agent unavailable (no API key, network error, etc.). Caller falls back
+    /// to the generic apology message.
     Failed,
 }
 
@@ -53,19 +68,21 @@ pub struct TriagemAgent {
 
 impl TriagemAgent {
     /// Build from env. Returns an agent with `client = None` when
-    /// `ANTHROPIC_API_KEY` is unset — every `interpret()` call short-circuits
-    /// to `AgentOutcome::Failed`, keeping the bot operable in dev without keys.
+    /// `ANTHROPIC_API_KEY` is unset/empty — every `interpret()` call
+    /// short-circuits to `AgentOutcome::Failed`, keeping the bot operable in
+    /// dev without keys.
     pub fn from_env(db: PgPool) -> Self {
-        let client = match env::var("ANTHROPIC_API_KEY") {
-            Ok(_) => match anthropic::Client::from_env() {
+        let raw_key = env::var("ANTHROPIC_API_KEY").ok();
+        let client = match raw_key.as_deref() {
+            Some(k) if !k.trim().is_empty() => match anthropic::Client::new(k.trim()) {
                 Ok(c) => Some(c),
                 Err(e) => {
                     tracing::warn!(target: "agent", error = %e, "anthropic client init failed");
                     None
                 }
             },
-            Err(_) => {
-                tracing::info!(target: "agent", "ANTHROPIC_API_KEY unset; LLM fallback disabled");
+            _ => {
+                tracing::info!(target: "agent", "ANTHROPIC_API_KEY missing/empty; LLM fallback disabled");
                 None
             }
         };
@@ -106,9 +123,7 @@ impl TriagemAgent {
             .build();
 
         let mut chat_history = history;
-        let chat_result = agent
-            .chat(user_text, &mut chat_history)
-            .await;
+        let chat_result = agent.chat(user_text, &mut chat_history).await;
 
         let assistant_text = match chat_result {
             Ok(text) => text,
@@ -128,12 +143,17 @@ impl TriagemAgent {
         }
 
         let value = captured.lock().ok().and_then(|g| g.clone());
+        let reply = if assistant_text.trim().is_empty() {
+            default_reply(step, value.as_deref())
+        } else {
+            assistant_text
+        };
         match value {
             Some(v) => {
                 tracing::info!(target: "agent", %session_id, value = %v, "interpreted");
-                AgentOutcome::Recorded(v)
+                AgentOutcome::Recorded { value: v, reply }
             }
-            None => AgentOutcome::Unparseable,
+            None => AgentOutcome::OnlyReply(reply),
         }
     }
 }
@@ -169,7 +189,7 @@ impl Tool for RecordAnswer {
                 "Record the social-assistance service the user needs. \
                  The `value` parameter MUST be exactly one of: \
                  bolsa_familia, cadastro_unico, bpc, outro_atendimento, nao_sei. \
-                 Call this tool only when you can confidently classify the user's intent.",
+                 Call this tool only when the user's intent is clear.",
                 json!({
                     "type": "string",
                     "enum": ["bolsa_familia", "cadastro_unico", "bpc", "outro_atendimento", "nao_sei"]
@@ -219,36 +239,93 @@ impl Tool for RecordAnswer {
 
 // ===== preambles =====
 
+const Q1_TEXT: &str =
+    "O que você precisa hoje? Opções: Bolsa Família, Cadastro Único, BPC, outro atendimento, ou não sei.";
+const Q2_TEXT: &str = "Você já tem cadastro no CadÚnico? (sim / não / não sei)";
+const Q3_TEXT: &str = "Qual é o seu NIS ou CPF? (somente números, 11 dígitos)";
+
 fn preamble_for(step: AgentStep) -> String {
-    let common = "Você é o assistente do CRAS no WhatsApp ajudando a triar atendimentos. \
-                  Escreva sempre em português brasileiro, com frases curtas e linguagem simples. \
-                  Quando o usuário expressar uma intenção compatível com uma das opções abaixo, \
-                  chame a ferramenta `record_answer` com o valor canônico correspondente. \
-                  Se o usuário fizer uma pergunta ou estiver claramente perdido, explique brevemente \
-                  e termine a resposta reapresentando a pergunta atual.";
+    let common = "Você é o assistente do CRAS no WhatsApp. Sua função é ajudar a triar \
+                  atendimentos socioassistenciais e tirar dúvidas sobre Bolsa Família, BPC, \
+                  Cadastro Único, CRAS, CREAS e serviços de assistência social.\n\
+                  \n\
+                  Regras de estilo:\n\
+                  - Sempre em português brasileiro, frases curtas, linguagem simples.\n\
+                  - Use emojis com moderação, no estilo WhatsApp.\n\
+                  - Nunca peça mais dados além do necessário para a pergunta atual.\n\
+                  \n\
+                  Regras de comportamento:\n\
+                  1. Se o usuário respondeu a pergunta atual de forma compreensível, chame a \
+                     ferramenta `record_answer` com o valor canônico E responda em 1–2 frases \
+                     curtas confirmando o que você entendeu e justificando rapidamente o porquê. \
+                     Termine a mensagem com a PRÓXIMA pergunta do roteiro.\n\
+                  2. Se o usuário fez uma pergunta, pediu ajuda, demonstrou dúvida sobre algum \
+                     benefício, ou se está confuso, NÃO chame a ferramenta. Responda a dúvida \
+                     com 2–4 frases informativas e termine a mensagem reapresentando a PERGUNTA \
+                     ATUAL — assim ele sabe como prosseguir.\n\
+                  3. Nunca invente valores, datas, telefones, CPFs ou endereços. Se não souber, \
+                     diga para o usuário procurar o CRAS de referência.\n\
+                  4. Não cumprimente nem se apresente de novo — o cidadão já está em atendimento.";
+
     match step {
         AgentStep::Q1 => format!(
-            "{common}\n\nPergunta atual: \"O que você precisa hoje?\"\n\n\
+            "{common}\n\n\
+             === PERGUNTA ATUAL (Q1 de 3) ===\n{q1}\n\n\
+             === PRÓXIMA PERGUNTA (Q2) ===\n{q2}\n\n\
              Mapeamento livre → canônico:\n\
              - Bolsa Família, auxílio, ajuda pros filhos, cesta básica → bolsa_familia\n\
              - CadÚnico, cadastro único, recadastrar, atualizar cadastro → cadastro_unico\n\
              - BPC, LOAS, benefício para idoso ou pessoa com deficiência → bpc\n\
              - Qualquer outro serviço social → outro_atendimento\n\
-             - Não sabe, não tem certeza → nao_sei"
+             - Não sabe, não tem certeza → nao_sei\n\n\
+             Exemplos de boa resposta com tool-call:\n\
+             User: \"preciso de uma ajuda pra alimentar meus filhos\"\n\
+             → record_answer(value=\"bolsa_familia\"); reply: \"Entendi! Pelo que você descreveu, \
+             o caminho é o Bolsa Família, que é o benefício de transferência de renda para \
+             famílias com filhos. {q2}\"\n\n\
+             User: \"o que é BPC mesmo?\"\n\
+             → NÃO chame a ferramenta; reply: \"O BPC é um benefício mensal de 1 salário mínimo \
+             para idosos com 65+ anos ou pessoas com deficiência, sem precisar ter contribuído \
+             com o INSS. {q1}\"",
+            q1 = Q1_TEXT,
+            q2 = Q2_TEXT
         ),
         AgentStep::Q2 => format!(
-            "{common}\n\nPergunta atual: \"Você já tem cadastro no CadÚnico?\"\n\n\
+            "{common}\n\n\
+             === PERGUNTA ATUAL (Q2 de 3) ===\n{q2}\n\n\
+             === PRÓXIMA PERGUNTA (Q3) ===\n{q3}\n\n\
              Mapeamento livre → canônico:\n\
-             - Afirmativo (sim, tenho, já fiz) → sim\n\
-             - Negativo (não, nunca fiz) → nao\n\
-             - Incerteza (não lembro, talvez) → nao_sei"
+             - Afirmativo (sim, tenho, já fiz, faz tempo) → sim\n\
+             - Negativo (não, nunca fiz, sem cadastro) → nao\n\
+             - Incerteza (não lembro, talvez, acho que sim mas faz tempo) → nao_sei",
+            q2 = Q2_TEXT,
+            q3 = Q3_TEXT
         ),
         AgentStep::Q3 => format!(
-            "{common}\n\nPergunta atual: \"Qual é o seu NIS ou CPF?\"\n\n\
-             Procure por um identificador de 11 dígitos no texto, ignorando pontos, traços e espaços. \
-             Se houver exatamente 11 dígitos, chame `record_answer` com a string só de dígitos. \
-             Se houver número com tamanho diferente, peça que o usuário envie novamente, somente números."
+            "{common}\n\n\
+             === PERGUNTA ATUAL (Q3 de 3) ===\n{q3}\n\n\
+             === DEPOIS DESTA ===\nO sistema gera o agendamento automaticamente e envia uma \
+             confirmação com data, unidade e documentos. NÃO peça mais dados ao usuário e NÃO \
+             diga próxima pergunta — apenas confirme que recebeu o número.\n\n\
+             Regras de extração:\n\
+             - Procure por exatamente 11 dígitos no texto, ignorando pontos, traços e espaços.\n\
+             - Encontrou 11 dígitos? Chame record_answer com a string só de dígitos e responda: \
+             \"Recebi seu número, {{primeiros4}}...{{ultimos2}}. Vou gerar seu agendamento agora.\"\n\
+             - Mais ou menos que 11 dígitos? Não chame a ferramenta; peça que o usuário envie de \
+             novo somente os 11 números.",
+            q3 = Q3_TEXT
         ),
+    }
+}
+
+fn default_reply(step: AgentStep, value: Option<&str>) -> String {
+    match (step, value) {
+        (AgentStep::Q1, Some(_)) => format!("Entendi! Vamos para a próxima.\n\n{Q2_TEXT}"),
+        (AgentStep::Q2, Some(_)) => format!("Anotado. Última pergunta:\n\n{Q3_TEXT}"),
+        (AgentStep::Q3, Some(_)) => "Recebi seu número. Vou gerar seu agendamento agora.".into(),
+        (AgentStep::Q1, None) => format!("Não consegui entender. {Q1_TEXT}"),
+        (AgentStep::Q2, None) => format!("Não consegui entender. {Q2_TEXT}"),
+        (AgentStep::Q3, None) => format!("Não consegui ler o número. {Q3_TEXT}"),
     }
 }
 
@@ -295,8 +372,5 @@ async fn persist_turn(
     Ok(())
 }
 
-// Quiet `MAX_TURNS` for now — rig's `.chat()` does a single completion turn,
-// but we keep the constant in scope so a future switch to `.prompt().max_turns(_)`
-// can read from one place.
 #[allow(dead_code)]
 const _MAX_TURNS_HINT: usize = MAX_TURNS;

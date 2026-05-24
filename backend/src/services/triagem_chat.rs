@@ -40,8 +40,6 @@ const Q3: &str = "*Pergunta 3 de 3*\n\
                   Qual é o seu NIS ou CPF?\n\
                   _(somente números, 11 dígitos)_";
 
-const REPROMPT_PREFIX: &str = "❌ Não entendi sua resposta.\n\n";
-
 pub async fn handle_inbound(
     db: &PgPool,
     wa: &WhatsappService,
@@ -74,13 +72,18 @@ pub async fn handle_inbound(
     .fetch_optional(db)
     .await?;
 
+    // For brand-new sessions we still process this very first message: a
+    // greeting like "oi" goes through the agent's OnlyReply path (which
+    // includes Q1 in its reply), and a substantive first message like
+    // "preciso de ajuda" gets classified immediately. Avoids dropping the
+    // user's first turn while still hitting the LLM only when there's
+    // actually something to say.
     let (sid, step) = match active {
         Some(a) => (a.id, a.n_answers as usize),
         None => {
             let id = start_session(db, from_phone).await?;
-            wa.send_text(chat_id, Q1).await?;
             tracing::info!(target: "triagem", %from_phone, sid = %id, "session started");
-            return Ok(());
+            (id, 0)
         }
     };
 
@@ -111,9 +114,12 @@ async fn handle_q1(
     let label = match parse_q1(normalized) {
         Some((l, _)) => l.to_string(),
         None => match agent.interpret(sid, AgentStep::Q1, raw_text).await {
-            AgentOutcome::Recorded(v) => v,
-            AgentOutcome::Unparseable => {
-                wa.send_text(chat_id, &format!("{REPROMPT_PREFIX}{Q1}")).await?;
+            AgentOutcome::Recorded { value, reply } => {
+                wa.send_text(chat_id, &reply).await?;
+                value
+            }
+            AgentOutcome::OnlyReply(reply) => {
+                wa.send_text(chat_id, &reply).await?;
                 return Ok(());
             }
             AgentOutcome::Failed => {
@@ -122,6 +128,7 @@ async fn handle_q1(
             }
         },
     };
+    let parser_hit = parse_q1(normalized).is_some();
     let service = match label.as_str() {
         "bolsa_familia" => ServiceType::BolsaFamilia,
         "cadastro_unico" => ServiceType::CadastroUnico,
@@ -140,7 +147,9 @@ async fn handle_q1(
         .bind(sid)
         .execute(db)
         .await?;
-    wa.send_text(chat_id, Q2).await?;
+    if parser_hit {
+        wa.send_text(chat_id, Q2).await?;
+    }
     Ok(())
 }
 
@@ -156,9 +165,12 @@ async fn handle_q2(
     let val = match parse_q2(normalized) {
         Some(v) => v.to_string(),
         None => match agent.interpret(sid, AgentStep::Q2, raw_text).await {
-            AgentOutcome::Recorded(v) => v,
-            AgentOutcome::Unparseable => {
-                wa.send_text(chat_id, &format!("{REPROMPT_PREFIX}{Q2}")).await?;
+            AgentOutcome::Recorded { value, reply } => {
+                wa.send_text(chat_id, &reply).await?;
+                value
+            }
+            AgentOutcome::OnlyReply(reply) => {
+                wa.send_text(chat_id, &reply).await?;
                 return Ok(());
             }
             AgentOutcome::Failed => {
@@ -167,6 +179,7 @@ async fn handle_q2(
             }
         },
     };
+    let parser_hit = parse_q2(normalized).is_some();
     sqlx::query(
         "INSERT INTO triagem_answers (session_id, question_id, value) VALUES ($1, 'tem_cadastro', $2)",
     )
@@ -174,7 +187,9 @@ async fn handle_q2(
     .bind(&val)
     .execute(db)
     .await?;
-    wa.send_text(chat_id, Q3).await?;
+    if parser_hit {
+        wa.send_text(chat_id, Q3).await?;
+    }
     Ok(())
 }
 
@@ -191,9 +206,12 @@ async fn handle_q3(
     let nis = match parse_q3(text) {
         Some(n) => n,
         None => match agent.interpret(sid, AgentStep::Q3, text).await {
-            AgentOutcome::Recorded(v) => v,
-            AgentOutcome::Unparseable => {
-                wa.send_text(chat_id, &format!("{REPROMPT_PREFIX}{Q3}")).await?;
+            AgentOutcome::Recorded { value, reply } => {
+                wa.send_text(chat_id, &reply).await?;
+                value
+            }
+            AgentOutcome::OnlyReply(reply) => {
+                wa.send_text(chat_id, &reply).await?;
                 return Ok(());
             }
             AgentOutcome::Failed => {
