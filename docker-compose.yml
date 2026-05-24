@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-conecta}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-conecta_social}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - conecta_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-conecta}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-conecta_social}
+      BIND_ADDR: 0.0.0.0:8080
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn,tower_http=info}
+      EVOLUTION_BASE_URL: ${EVOLUTION_BASE_URL:-http://evolution-go:8080}
+      EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+      WHATSAPP_SIMULATED: ${WHATSAPP_SIMULATED:-false}
+    expose:
+      - "8080"
+    networks:
+      - conecta_net
+      - evolution_net
+
+networks:
+  conecta_net:
+    driver: bridge
+  evolution_net:
+    external: true
+    name: sh-evolutiongo-wdlt0r_evolution_net
+
+volumes:
+  pgdata:

@@ -26,6 +26,7 @@ impl ApiError {
             ApiError::NotFound => "not_found",
             ApiError::BadRequest(_) => "bad_request",
             ApiError::Conflict(_) => "conflict",
+            ApiError::Sqlx(sqlx::Error::RowNotFound) => "not_found",
             ApiError::Sqlx(_) => "db_error",
             ApiError::Other(_) => "internal_error",
         }

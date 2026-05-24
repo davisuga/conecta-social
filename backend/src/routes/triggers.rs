@@ -9,7 +9,7 @@ use crate::{
 };
 
 #[derive(Debug, Serialize)]
-struct TriggerCatalogEntry {
+pub struct TriggerCatalogEntry {
     #[serde(rename = "type")]
     r#type: TriggerType,
     label: String,
@@ -62,7 +62,7 @@ async fn insert_messages_for_profile(
     Ok(out)
 }
 
-async fn evaluate_triggers(
+pub async fn evaluate_triggers(
     State(state): State<AppState>,
     Json(body): Json<EvaluateBody>,
 ) -> ApiResult<Json<Vec<Message>>> {
@@ -76,7 +76,7 @@ async fn evaluate_triggers(
                     "nis must contain exactly 11 digits".into(),
                 ));
             }
-            let select_sql = format!("{PROFILE_SELECT} FROM profiles WHERE nis = $1");
+            let select_sql = format!("SELECT {PROFILE_SELECT} FROM profiles WHERE nis = $1");
             let profile: ProfileRow = sqlx::query_as::<_, ProfileRow>(&select_sql)
                 .bind(&nis)
                 .fetch_optional(&mut *tx)
@@ -87,7 +87,7 @@ async fn evaluate_triggers(
         }
         None => {
             let select_sql = format!(
-                "{PROFILE_SELECT} FROM profiles WHERE opt_in = true ORDER BY updated_at DESC LIMIT 100"
+                "SELECT {PROFILE_SELECT} FROM profiles WHERE opt_in = true ORDER BY updated_at DESC LIMIT 100"
             );
             let profiles: Vec<ProfileRow> = sqlx::query_as::<_, ProfileRow>(&select_sql)
                 .fetch_all(&mut *tx)
