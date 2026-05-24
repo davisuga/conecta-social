@@ -1,35 +1,55 @@
-use axum::{body::Bytes, http::StatusCode, response::IntoResponse, Json};
+use axum::{body::Bytes, extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
 
-use crate::services::whatsapp::parse_webhook;
+use crate::services::{triagem_chat, whatsapp::parse_webhook};
+use crate::state::AppState;
 
 /// POST /api/whatsapp/webhook
 ///
-/// Evolution-go inbound. Always responds 200 so the provider doesn't retry.
-/// Parses the envelope and logs the message; triagem state machine is
-/// dispatched downstream (TODO).
-pub async fn webhook(body: Bytes) -> impl IntoResponse {
-    match parse_webhook(&body) {
-        Ok(Some(msg)) => {
-            tracing::info!(
-                target: "whatsapp",
-                from = %msg.from_phone,
-                push_name = msg.push_name.as_deref().unwrap_or(""),
-                text = %msg.text,
-                "inbound"
+/// Evolution-go inbound. Always returns 200 so the provider doesn't retry.
+/// Parses envelope → dispatches to triagem state machine.
+pub async fn webhook(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
+    let parsed = match parse_webhook(&body) {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                Json(json!({ "ok": true, "handled": false, "reason": "ignored" })),
             );
-            (StatusCode::OK, Json(json!({ "ok": true, "handled": true })))
         }
-        Ok(None) => (
-            StatusCode::OK,
-            Json(json!({ "ok": true, "handled": false, "reason": "ignored" })),
-        ),
         Err(e) => {
             tracing::warn!(target: "whatsapp", error = %e, "webhook parse failed");
-            (
+            return (
                 StatusCode::OK,
                 Json(json!({ "ok": true, "handled": false, "parse_error": e.to_string() })),
-            )
+            );
         }
+    };
+
+    tracing::info!(
+        target: "whatsapp",
+        from = %parsed.from_phone,
+        push_name = parsed.push_name.as_deref().unwrap_or(""),
+        text = %parsed.text,
+        "inbound"
+    );
+
+    if let Err(err) = triagem_chat::handle_inbound(
+        &state.db,
+        &state.whatsapp,
+        &parsed.chat_id,
+        &parsed.from_phone,
+        parsed.push_name.as_deref(),
+        &parsed.text,
+    )
+    .await
+    {
+        tracing::error!(target: "triagem", error = ?err, "handler failed");
+        return (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "handled": false, "error": err.to_string() })),
+        );
     }
+
+    (StatusCode::OK, Json(json!({ "ok": true, "handled": true })))
 }
