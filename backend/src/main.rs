@@ -50,7 +50,8 @@ async fn main() -> anyhow::Result<()> {
         .context("starting alerts scheduler")?;
 
     let whatsapp = services::whatsapp::WhatsappService::from_env(pool.clone());
-    let state = AppState { db: pool, whatsapp };
+    let agent = services::agent::TriagemAgent::from_env(pool.clone());
+    let state = AppState { db: pool, whatsapp, agent };
 
     let cors = CorsLayer::new()
         .allow_origin(cors_origin.parse::<HeaderValue>()?)

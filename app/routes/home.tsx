@@ -43,7 +43,7 @@ import {
 import type { Channel, Message } from "~/lib/types"
 
 export function meta() {
-  return [{ title: "Resumo — Conecta Social" }]
+  return [{ title: "Resumo — Conecta SUAS" }]
 }
 
 export default function HomeRoute() {

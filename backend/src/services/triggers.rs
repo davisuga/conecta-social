@@ -142,3 +142,129 @@ pub fn applicable_triggers(p: &ProfileRow) -> Vec<TriggerType> {
 pub fn pick_one(p: &ProfileRow) -> Option<TriggerType> {
     applicable_triggers(p).into_iter().min_by_key(|t| priority(*t))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    fn base_profile() -> ProfileRow {
+        let now = Utc::now();
+        ProfileRow {
+            nis: "12345678901".into(),
+            cpf: None,
+            name: "Maria Silva".into(),
+            phone: Some("+5511999999999".into()),
+            family_adults: 2,
+            family_children: 0,
+            family_elderly: 0,
+            family_total: 2,
+            per_capita_income: 1000.0,
+            active_benefits: vec![],
+            opt_in: true,
+            opt_in_at: Some(now),
+            last_visit_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn days_ago(d: i64) -> DateTime<Utc> {
+        Utc::now() - Duration::days(d)
+    }
+
+    #[test]
+    fn priority_order_matches_spec() {
+        assert!(priority(TriggerType::RecadastramentoProximo) < priority(TriggerType::RiscoCondicionalidade));
+        assert!(priority(TriggerType::RiscoCondicionalidade) < priority(TriggerType::BpcNaoRequerido));
+        assert!(priority(TriggerType::BpcNaoRequerido) < priority(TriggerType::BolsaFamiliaElegivel));
+        assert!(priority(TriggerType::BolsaFamiliaElegivel) < priority(TriggerType::PerfilScfv));
+    }
+
+    #[test]
+    fn empty_when_nothing_applies() {
+        let p = base_profile();
+        assert!(applicable_triggers(&p).is_empty());
+        assert_eq!(pick_one(&p), None);
+    }
+
+    #[test]
+    fn bolsa_familia_when_low_income_no_benefit() {
+        let mut p = base_profile();
+        p.per_capita_income = 180.0;
+        p.family_children = 2;
+        let triggers = applicable_triggers(&p);
+        assert!(triggers.contains(&TriggerType::BolsaFamiliaElegivel));
+    }
+
+    #[test]
+    fn no_bolsa_when_already_active() {
+        let mut p = base_profile();
+        p.per_capita_income = 180.0;
+        p.family_children = 2;
+        p.active_benefits = vec!["bolsa_familia".into()];
+        let triggers = applicable_triggers(&p);
+        assert!(!triggers.contains(&TriggerType::BolsaFamiliaElegivel));
+    }
+
+    #[test]
+    fn recadastramento_vencido_24m_generic() {
+        let mut p = base_profile();
+        p.updated_at = days_ago(25 * 30);
+        let triggers = applicable_triggers(&p);
+        assert!(triggers.contains(&TriggerType::RecadastramentoProximo));
+    }
+
+    #[test]
+    fn recadastramento_18m_only_for_bolsa() {
+        let mut p = base_profile();
+        p.updated_at = days_ago(19 * 30);
+        // Without bolsa: should NOT trigger (only 19m, threshold is 24m).
+        assert!(!applicable_triggers(&p).contains(&TriggerType::RecadastramentoProximo));
+        // With bolsa: SHOULD trigger (18m+ window).
+        p.active_benefits = vec!["bolsa_familia".into()];
+        // Keep children so visit-stale path doesn't dominate; we just check Recad triggers.
+        assert!(applicable_triggers(&p).contains(&TriggerType::RecadastramentoProximo));
+    }
+
+    #[test]
+    fn bpc_when_elderly_and_low_income() {
+        let mut p = base_profile();
+        p.family_elderly = 1;
+        p.per_capita_income = 300.0;
+        let triggers = applicable_triggers(&p);
+        assert!(triggers.contains(&TriggerType::BpcNaoRequerido));
+    }
+
+    #[test]
+    fn no_bpc_above_quarter_minimum_wage() {
+        let mut p = base_profile();
+        p.family_elderly = 1;
+        p.per_capita_income = 500.0;
+        assert!(!applicable_triggers(&p).contains(&TriggerType::BpcNaoRequerido));
+    }
+
+    #[test]
+    fn risco_condicionalidade_when_bolsa_and_stale_visit() {
+        let mut p = base_profile();
+        p.active_benefits = vec!["bolsa_familia".into()];
+        p.family_children = 1;
+        p.last_visit_at = Some(days_ago(10 * 30));
+        assert!(applicable_triggers(&p).contains(&TriggerType::RiscoCondicionalidade));
+    }
+
+    #[test]
+    fn pick_one_returns_highest_priority() {
+        // Profile that hits multiple triggers; recadastramento (priority 0) wins.
+        let mut p = base_profile();
+        p.per_capita_income = 180.0;
+        p.family_children = 2;
+        p.family_elderly = 1;
+        p.updated_at = days_ago(30 * 30);
+        p.last_visit_at = Some(days_ago(12 * 30));
+        p.active_benefits = vec!["bolsa_familia".into()];
+
+        let chosen = pick_one(&p).expect("expected at least one trigger");
+        assert_eq!(chosen, TriggerType::RecadastramentoProximo);
+    }
+}

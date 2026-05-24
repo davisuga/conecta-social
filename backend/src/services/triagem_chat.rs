@@ -14,7 +14,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::{ServiceType, TriagemChannel};
+use crate::services::agent::{AgentOutcome, AgentStep, TriagemAgent};
 use crate::services::whatsapp::WhatsappService;
+
+const AGENT_ERROR_FALLBACK: &str =
+    "❗ Tive um problema agora. Pode tentar de novo em alguns instantes?";
 
 const Q1: &str = "👋 Olá! Vou te ajudar com seu atendimento.\n\n\
                   *Pergunta 1 de 3*\n\
@@ -41,6 +45,7 @@ const REPROMPT_PREFIX: &str = "❌ Não entendi sua resposta.\n\n";
 pub async fn handle_inbound(
     db: &PgPool,
     wa: &WhatsappService,
+    agent: &TriagemAgent,
     chat_id: &str,
     from_phone: &str,
     push_name: Option<&str>,
@@ -80,9 +85,9 @@ pub async fn handle_inbound(
     };
 
     match step {
-        0 => handle_q1(db, wa, sid, chat_id, &normalized).await,
-        1 => handle_q2(db, wa, sid, chat_id, &normalized).await,
-        2 => handle_q3(db, wa, sid, chat_id, from_phone, push_name, text).await,
+        0 => handle_q1(db, wa, agent, sid, chat_id, &normalized, text).await,
+        1 => handle_q2(db, wa, agent, sid, chat_id, &normalized, text).await,
+        2 => handle_q3(db, wa, agent, sid, chat_id, from_phone, push_name, text).await,
         _ => {
             wa.send_text(
                 chat_id,
@@ -97,19 +102,37 @@ pub async fn handle_inbound(
 async fn handle_q1(
     db: &PgPool,
     wa: &WhatsappService,
+    agent: &TriagemAgent,
     sid: Uuid,
     chat_id: &str,
     normalized: &str,
+    raw_text: &str,
 ) -> anyhow::Result<()> {
-    let Some((label, service)) = parse_q1(normalized) else {
-        wa.send_text(chat_id, &format!("{REPROMPT_PREFIX}{Q1}")).await?;
-        return Ok(());
+    let label = match parse_q1(normalized) {
+        Some((l, _)) => l.to_string(),
+        None => match agent.interpret(sid, AgentStep::Q1, raw_text).await {
+            AgentOutcome::Recorded(v) => v,
+            AgentOutcome::Unparseable => {
+                wa.send_text(chat_id, &format!("{REPROMPT_PREFIX}{Q1}")).await?;
+                return Ok(());
+            }
+            AgentOutcome::Failed => {
+                wa.send_text(chat_id, AGENT_ERROR_FALLBACK).await?;
+                return Ok(());
+            }
+        },
+    };
+    let service = match label.as_str() {
+        "bolsa_familia" => ServiceType::BolsaFamilia,
+        "cadastro_unico" => ServiceType::CadastroUnico,
+        "bpc" => ServiceType::Bpc,
+        _ => ServiceType::OutroAtendimento,
     };
     sqlx::query(
         "INSERT INTO triagem_answers (session_id, question_id, value) VALUES ($1, 'precisa_hoje', $2)",
     )
     .bind(sid)
-    .bind(label)
+    .bind(&label)
     .execute(db)
     .await?;
     sqlx::query("UPDATE triagem_sessions SET result_service = $1 WHERE id = $2")
@@ -124,19 +147,31 @@ async fn handle_q1(
 async fn handle_q2(
     db: &PgPool,
     wa: &WhatsappService,
+    agent: &TriagemAgent,
     sid: Uuid,
     chat_id: &str,
     normalized: &str,
+    raw_text: &str,
 ) -> anyhow::Result<()> {
-    let Some(val) = parse_q2(normalized) else {
-        wa.send_text(chat_id, &format!("{REPROMPT_PREFIX}{Q2}")).await?;
-        return Ok(());
+    let val = match parse_q2(normalized) {
+        Some(v) => v.to_string(),
+        None => match agent.interpret(sid, AgentStep::Q2, raw_text).await {
+            AgentOutcome::Recorded(v) => v,
+            AgentOutcome::Unparseable => {
+                wa.send_text(chat_id, &format!("{REPROMPT_PREFIX}{Q2}")).await?;
+                return Ok(());
+            }
+            AgentOutcome::Failed => {
+                wa.send_text(chat_id, AGENT_ERROR_FALLBACK).await?;
+                return Ok(());
+            }
+        },
     };
     sqlx::query(
         "INSERT INTO triagem_answers (session_id, question_id, value) VALUES ($1, 'tem_cadastro', $2)",
     )
     .bind(sid)
-    .bind(val)
+    .bind(&val)
     .execute(db)
     .await?;
     wa.send_text(chat_id, Q3).await?;
@@ -146,15 +181,26 @@ async fn handle_q2(
 async fn handle_q3(
     db: &PgPool,
     wa: &WhatsappService,
+    agent: &TriagemAgent,
     sid: Uuid,
     chat_id: &str,
     from_phone: &str,
     push_name: Option<&str>,
     text: &str,
 ) -> anyhow::Result<()> {
-    let Some(nis) = parse_q3(text) else {
-        wa.send_text(chat_id, &format!("{REPROMPT_PREFIX}{Q3}")).await?;
-        return Ok(());
+    let nis = match parse_q3(text) {
+        Some(n) => n,
+        None => match agent.interpret(sid, AgentStep::Q3, text).await {
+            AgentOutcome::Recorded(v) => v,
+            AgentOutcome::Unparseable => {
+                wa.send_text(chat_id, &format!("{REPROMPT_PREFIX}{Q3}")).await?;
+                return Ok(());
+            }
+            AgentOutcome::Failed => {
+                wa.send_text(chat_id, AGENT_ERROR_FALLBACK).await?;
+                return Ok(());
+            }
+        },
     };
     sqlx::query(
         "INSERT INTO triagem_answers (session_id, question_id, value) VALUES ($1, 'nis_cpf', $2)",

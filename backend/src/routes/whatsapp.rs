@@ -37,6 +37,7 @@ pub async fn webhook(State(state): State<AppState>, body: Bytes) -> impl IntoRes
     if let Err(err) = triagem_chat::handle_inbound(
         &state.db,
         &state.whatsapp,
+        &state.agent,
         &parsed.chat_id,
         &parsed.from_phone,
         parsed.push_name.as_deref(),

@@ -29,7 +29,7 @@ import { API_BASE, api } from "~/lib/api"
 import { triggerLabel } from "~/lib/format"
 
 export function meta() {
-  return [{ title: "Configurações — Conecta Social" }]
+  return [{ title: "Configurações — Conecta SUAS" }]
 }
 
 export default function ConfiguracoesRoute() {

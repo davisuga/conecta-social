@@ -45,7 +45,7 @@ import {
 import type { AppointmentStatus, ServiceType } from "~/lib/types"
 
 export function meta() {
-  return [{ title: "Agendamentos — Conecta Social" }]
+  return [{ title: "Agendamentos — Conecta SUAS" }]
 }
 
 const PAGE_SIZE = 10

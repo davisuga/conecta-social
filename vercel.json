@@ -1,0 +1,16 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "build/client",
+  "framework": null,
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "http://conecta-social-yexs2y-727116-74-208-159-201.sslip.io/api/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "http://conecta-social-yexs2y-727116-74-208-159-201.sslip.io/health"
+    },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

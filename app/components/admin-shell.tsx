@@ -54,24 +54,17 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
   return (
     <SidebarProvider>
       <Sidebar>
-        <SidebarHeader className="gap-3 p-4">
-          <div className="flex items-center gap-3">
-            <BrandMark className="size-9" />
-            <div className="flex min-w-0 flex-col">
-              <span className="truncate text-sm leading-tight font-semibold text-primary">
-                Comunicação Proativa
-              </span>
-              <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                e Triagem Digital
-                <Badge
-                  variant="secondary"
-                  className="bg-primary/10 px-1.5 py-0 text-[10px] font-semibold tracking-wide text-primary uppercase"
-                >
-                  MVP
-                </Badge>
-              </span>
-            </div>
-          </div>
+        <SidebarHeader className="gap-2 p-4">
+          <BrandMark className="text-2xl" />
+          <span className="flex items-center gap-2 text-xs text-muted-foreground">
+            Comunicação Proativa e Triagem Digital
+            <Badge
+              variant="secondary"
+              className="bg-primary/10 px-1.5 py-0 text-[10px] font-semibold tracking-wide text-primary uppercase"
+            >
+              MVP
+            </Badge>
+          </span>
         </SidebarHeader>
 
         <SidebarContent className="px-2">

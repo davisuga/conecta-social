@@ -30,7 +30,7 @@ import {
 } from "~/lib/format"
 
 export function meta() {
-  return [{ title: "Perfis — Conecta Social" }]
+  return [{ title: "Perfis — Conecta SUAS" }]
 }
 
 const PAGE_SIZE = 10

@@ -45,7 +45,7 @@ import type {
 } from "~/lib/types"
 
 export function meta() {
-  return [{ title: "Alertas e Mensagens — Conecta Social" }]
+  return [{ title: "Alertas e Mensagens — Conecta SUAS" }]
 }
 
 const PAGE_SIZE = 10

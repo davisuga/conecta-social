@@ -1,0 +1,8 @@
+backend
+node_modules
+.react-router
+build
+*.png
+*.zip
+.git
+.DS_Store
