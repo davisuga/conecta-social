@@ -33,6 +33,8 @@ services:
       EVOLUTION_BASE_URL: ${EVOLUTION_BASE_URL:-http://evolution-go:8080}
       EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
       WHATSAPP_SIMULATED: ${WHATSAPP_SIMULATED:-false}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      RIG_MODEL: ${RIG_MODEL:-claude-haiku-4-5-20251001}
     expose:
       - "8080"
     networks:
