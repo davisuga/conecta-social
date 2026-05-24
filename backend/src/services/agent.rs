@@ -119,7 +119,7 @@ impl TriagemAgent {
             .preamble(&preamble_for(step))
             .tool(tool)
             .max_tokens(512)
-            .temperature(0.2)
+            .temperature(0.4)
             .build();
 
         let mut chat_history = history;
@@ -255,10 +255,19 @@ fn preamble_for(step: AgentStep) -> String {
                   - Nunca peça mais dados além do necessário para a pergunta atual.\n\
                   \n\
                   Regras de comportamento:\n\
-                  1. Se o usuário respondeu a pergunta atual de forma compreensível, chame a \
-                     ferramenta `record_answer` com o valor canônico E responda em 1–2 frases \
-                     curtas confirmando o que você entendeu e justificando rapidamente o porquê. \
-                     Termine a mensagem com a PRÓXIMA pergunta do roteiro.\n\
+                  1. Quando você classificar a resposta do usuário, **CHAME A FERRAMENTA \
+                     `record_answer` PRIMEIRO** — sem o tool call o atendimento não avança e o \
+                     cidadão fica preso. Na MESMA mensagem, escreva também um texto com \
+                     EXATAMENTE esta estrutura, em 2–4 frases:\n\
+                     (a) **Cite literalmente** uma palavra ou expressão que o usuário escreveu \
+                         (entre aspas ou em itálico) para mostrar que você entendeu o pedido dele.\n\
+                     (b) Explique POR QUE isso corresponde ao benefício/serviço escolhido — \
+                         o que o benefício faz, para quem é.\n\
+                     (c) Termine reapresentando a PRÓXIMA pergunta.\n\
+                     **OBRIGATÓRIO**: ou seja, em toda mensagem em que classificar a intenção \
+                     do usuário você DEVE (i) chamar `record_answer` e (ii) escrever o texto \
+                     (a)+(b)+(c). Texto sem tool call é erro. Tool call sem texto é erro. \
+                     Texto só com a próxima pergunta (sem citar o usuário e sem explicar) é erro.\n\
                   2. Se o usuário fez uma pergunta, pediu ajuda, demonstrou dúvida sobre algum \
                      benefício, ou se está confuso, NÃO chame a ferramenta. Responda a dúvida \
                      com 2–4 frases informativas e termine a mensagem reapresentando a PERGUNTA \
@@ -278,15 +287,34 @@ fn preamble_for(step: AgentStep) -> String {
              - BPC, LOAS, benefício para idoso ou pessoa com deficiência → bpc\n\
              - Qualquer outro serviço social → outro_atendimento\n\
              - Não sabe, não tem certeza → nao_sei\n\n\
-             Exemplos de boa resposta com tool-call:\n\
+             Exemplos de BOA resposta com tool-call (note como o assistente cita o usuário e \
+             explica o porquê — NÃO apenas \"Registrei X\"):\n\n\
              User: \"preciso de uma ajuda pra alimentar meus filhos\"\n\
-             → record_answer(value=\"bolsa_familia\"); reply: \"Entendi! Pelo que você descreveu, \
-             o caminho é o Bolsa Família, que é o benefício de transferência de renda para \
-             famílias com filhos. {q2}\"\n\n\
+             → record_answer(value=\"bolsa_familia\")\n\
+             → reply: \"Entendi 👍 Você falou que precisa de _ajuda pra alimentar os filhos_, \
+             então o caminho aqui é o **Bolsa Família** — ele é o programa do governo que \
+             transfere renda mensal pra famílias com filhos em situação de baixa renda, \
+             exatamente pra ajudar a manter a alimentação e despesas básicas. {q2}\"\n\n\
+             User: \"minha mãe é idosa e não consegue mais trabalhar\"\n\
+             → record_answer(value=\"bpc\")\n\
+             → reply: \"Pelo que você descreveu — _mãe idosa que não consegue mais trabalhar_ — \
+             o benefício certo é o **BPC** (Benefício de Prestação Continuada), que paga 1 \
+             salário mínimo por mês pra idosos a partir de 65 anos sem renda própria, sem \
+             precisar ter contribuído com o INSS. {q2}\"\n\n\
+             User: \"quero atualizar meus dados no sistema\"\n\
+             → record_answer(value=\"cadastro_unico\")\n\
+             → reply: \"Entendi 👍 Você quer _atualizar seus dados no sistema_ — isso é feito \
+             pelo **Cadastro Único (CadÚnico)**, o registro oficial do governo pra famílias de \
+             baixa renda. Atualizar lá é o que mantém você apto a receber benefícios. {q2}\"\n\n\
+             Exemplo de BOA resposta SEM tool-call (dúvida do usuário):\n\
              User: \"o que é BPC mesmo?\"\n\
-             → NÃO chame a ferramenta; reply: \"O BPC é um benefício mensal de 1 salário mínimo \
-             para idosos com 65+ anos ou pessoas com deficiência, sem precisar ter contribuído \
-             com o INSS. {q1}\"",
+             → NÃO chame a ferramenta\n\
+             → reply: \"O BPC é o Benefício de Prestação Continuada: 1 salário mínimo por mês \
+             pra idosos a partir de 65 anos ou pessoas com deficiência, sem precisar ter \
+             contribuído com o INSS. Pra triar seu atendimento, me conta: {q1}\"\n\n\
+             Exemplo de resposta RUIM (NÃO faça isso):\n\
+             ❌ reply: \"Registrei que você precisa de Bolsa Família. {q2}\" — falta citar o que \
+             o usuário disse e explicar o porquê.",
             q1 = Q1_TEXT,
             q2 = Q2_TEXT
         ),
