@@ -1,8 +1,4 @@
-use axum::{
-    extract::State,
-    routing::{get, post},
-    Json, Router,
-};
+use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -12,12 +8,6 @@ use crate::{
     state::AppState,
 };
 
-pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/api/triggers", get(list_triggers))
-        .route("/api/triggers/evaluate", post(evaluate_triggers))
-}
-
 #[derive(Debug, Serialize)]
 struct TriggerCatalogEntry {
     #[serde(rename = "type")]
@@ -26,7 +16,7 @@ struct TriggerCatalogEntry {
     description: String,
 }
 
-async fn list_triggers() -> ApiResult<Json<Vec<TriggerCatalogEntry>>> {
+pub async fn list_triggers() -> ApiResult<Json<Vec<TriggerCatalogEntry>>> {
     let items = trigger_service::catalog()
         .into_iter()
         .map(|m| TriggerCatalogEntry {
